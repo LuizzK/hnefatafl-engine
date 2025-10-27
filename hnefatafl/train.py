@@ -222,7 +222,7 @@ class Trainer:
         examples = worker.generate_games(
             num_games=self.config.num_games_per_iteration,
             verbose=self.config.verbose,
-            progress_interval=10
+            progress_interval=1  # Show progress every game (was 10)
         )
 
         return examples
