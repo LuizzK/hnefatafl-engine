@@ -159,6 +159,8 @@ def main():
     parser = argparse.ArgumentParser(description="Play Copenhagen Hnefatafl")
     parser.add_argument('--mode', choices=['cli', 'gui'], default='gui',
                         help='Interface mode: cli (command line) or gui (graphical, default)')
+    parser.add_argument('--game-mode', choices=['human', 'cpu', 'setup'], default='human',
+                        help='Game mode for GUI: human (human vs human), cpu (human vs cpu), setup (board setup)')
 
     args = parser.parse_args()
 
@@ -166,8 +168,17 @@ def main():
         main_cli()
     else:
         # Launch GUI
-        from hnefatafl.gui import HnefataflGUI
-        gui = HnefataflGUI(square_size=60)
+        from hnefatafl.gui import HnefataflGUI, GameMode
+
+        # Map argument to GameMode enum
+        mode_map = {
+            'human': GameMode.HUMAN_VS_HUMAN,
+            'cpu': GameMode.HUMAN_VS_CPU,
+            'setup': GameMode.SETUP
+        }
+        game_mode = mode_map[args.game_mode]
+
+        gui = HnefataflGUI(square_size=60, mode=game_mode)
         gui.run()
 
 

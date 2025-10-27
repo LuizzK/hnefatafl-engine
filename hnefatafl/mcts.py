@@ -118,7 +118,8 @@ class MCTS:
     """
 
     def __init__(self, neural_network=None, num_simulations: int = 800,
-                 c_puct: float = 1.5, temperature: float = 1.0):
+                 c_puct: float = 1.5, temperature: float = 1.0,
+                 dirichlet_alpha: float = 0.3, dirichlet_epsilon: float = 0.25):
         """
         Initialize MCTS.
 
@@ -127,24 +128,34 @@ class MCTS:
             num_simulations: Number of MCTS simulations per move
             c_puct: Exploration constant for PUCT algorithm
             temperature: Temperature for move selection (higher = more exploration)
+            dirichlet_alpha: Alpha parameter for Dirichlet noise (for exploration)
+            dirichlet_epsilon: Weight of Dirichlet noise in root node
         """
         self.neural_network = neural_network
         self.num_simulations = num_simulations
         self.c_puct = c_puct
         self.temperature = temperature
+        self.dirichlet_alpha = dirichlet_alpha
+        self.dirichlet_epsilon = dirichlet_epsilon
 
-    def search(self, game_state: HnefataflGame) -> Tuple[Move, np.ndarray]:
+    def search(self, game_state: HnefataflGame, temperature: Optional[float] = None) -> Tuple[Move, np.ndarray]:
         """
         Run MCTS from the given game state.
 
         Args:
             game_state: Current game state
+            temperature: Temperature for move selection (overrides default if provided)
 
         Returns:
             Tuple of (best_move, move_probabilities)
             - best_move: Best move according to MCTS
             - move_probabilities: Probability distribution over moves
         """
+        # Use provided temperature or default
+        if temperature is not None:
+            old_temperature = self.temperature
+            self.temperature = temperature
+
         root = MCTSNode(game_state)
 
         # Run simulations
@@ -179,7 +190,13 @@ class MCTS:
             self._backpropagate(search_path, value, root.game_state.current_player)
 
         # Select move based on visit counts
-        return self._select_move(root)
+        result = self._select_move(root)
+
+        # Restore original temperature if it was overridden
+        if temperature is not None:
+            self.temperature = old_temperature
+
+        return result
 
     def _evaluate_position(self, game_state: HnefataflGame) -> Tuple[np.ndarray, float]:
         """
