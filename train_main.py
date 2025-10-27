@@ -107,6 +107,12 @@ Examples:
         help='Override device (cpu or cuda)'
     )
 
+    parser.add_argument(
+        '--yes', '-y',
+        action='store_true',
+        help='Skip confirmation prompt and start training immediately'
+    )
+
     args = parser.parse_args()
 
     # Show configs and exit
@@ -169,8 +175,8 @@ Examples:
     # Print training plan
     print_training_plan(args.iterations, config)
 
-    # Confirm before starting
-    if not confirm_training():
+    # Confirm before starting (unless --yes flag is used)
+    if not args.yes and not confirm_training():
         print("Training cancelled.")
         return
 
