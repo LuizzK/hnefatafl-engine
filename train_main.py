@@ -45,7 +45,7 @@ Examples:
     parser.add_argument(
         '--config',
         type=str,
-        choices=['quick', 'standard', 'intense'],
+        choices=['mvp', 'quick', 'standard', 'intense'],
         default='standard',
         help='Training configuration preset (default: standard)'
     )
