@@ -62,9 +62,13 @@ class SelfPlayWorker:
             dirichlet_epsilon=dirichlet_epsilon
         )
 
-    def play_game(self, verbose: bool = False) -> List[TrainingExample]:
+    def play_game(self, verbose: bool = False, max_moves: int = 200) -> List[TrainingExample]:
         """
         Play one complete self-play game.
+
+        Args:
+            verbose: Print progress messages
+            max_moves: Maximum moves before declaring draw (prevents infinite games)
 
         Returns:
             List of training examples (state, policy, outcome) for each move
@@ -74,9 +78,9 @@ class SelfPlayWorker:
         move_count = 0
 
         if verbose:
-            print("Starting self-play game...")
+            print("Starting self-play game...", flush=True)
 
-        while not game.is_game_over():
+        while not game.is_game_over() and move_count < max_moves:
             move_count += 1
 
             # Get current state
@@ -97,15 +101,19 @@ class SelfPlayWorker:
             game.make_move(move)
 
             if verbose and move_count % 10 == 0:
-                print(f"Move {move_count} completed")
+                print(f"  Move {move_count}...", flush=True)
+
+        # Check if game hit move limit
+        if move_count >= max_moves and not game.is_game_over():
+            if verbose:
+                print(f"  Game reached max moves ({max_moves}), declaring draw", flush=True)
 
         # Get game outcome
         result = game.get_result()
         winner = game.get_winner()
 
         if verbose:
-            print(f"Game ended after {move_count} moves")
-            print(f"Result: {game.get_result_string()}")
+            print(f"  Game ended after {move_count} moves - {game.get_result_string()}", flush=True)
 
         # Assign outcomes to all positions
         # Outcome is from perspective of player at that position
@@ -155,8 +163,11 @@ class SelfPlayWorker:
                 elapsed = time.time() - start_time
                 games_per_sec = (game_num + 1) / elapsed
                 print(f"Generated {game_num + 1}/{num_games} games "
-                      f"({games_per_sec:.1f} games/sec, "
-                      f"{len(all_examples)} total positions)")
+                      f"({games_per_sec:.2f} games/sec, "
+                      f"{len(all_examples)} total positions)", flush=True)
+            elif verbose:
+                # Print brief progress for every game
+                print(f"  Game {game_num + 1}/{num_games} complete ({len(game_examples)} moves)", flush=True)
 
         if verbose:
             elapsed = time.time() - start_time

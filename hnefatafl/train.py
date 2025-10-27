@@ -154,42 +154,42 @@ class Trainer:
         self.iteration += 1
         start_time = time.time()
 
-        print(f"\n{'='*70}")
-        print(f"ITERATION {self.iteration}")
-        print(f"{'='*70}")
+        print(f"\n{'='*70}", flush=True)
+        print(f"ITERATION {self.iteration}", flush=True)
+        print(f"{'='*70}", flush=True)
 
         # Step 1: Generate self-play games
-        print("\n[1/5] Generating self-play games...")
+        print("\n[1/5] Generating self-play games...", flush=True)
         new_examples = self._generate_selfplay_games()
         self.replay_buffer.extend(new_examples)
         self.total_games += self.config.num_games_per_iteration
         self.total_positions += len(new_examples)
 
-        print(f"   Generated {len(new_examples)} new positions")
-        print(f"   Replay buffer: {len(self.replay_buffer):,} positions")
+        print(f"   Generated {len(new_examples)} new positions", flush=True)
+        print(f"   Replay buffer: {len(self.replay_buffer):,} positions", flush=True)
 
         # Step 2: Train network
-        print("\n[2/5] Training neural network...")
+        print("\n[2/5] Training neural network...", flush=True)
         train_metrics = self._train_network()
 
         # Step 3: Evaluate new model
-        print("\n[3/5] Evaluating new model...")
+        print("\n[3/5] Evaluating new model...", flush=True)
         win_rate = self._evaluate_models()
         self.win_rates.append(win_rate)
 
         # Step 4: Update best model
-        print("\n[4/5] Updating best model...")
+        print("\n[4/5] Updating best model...", flush=True)
         if win_rate > self.config.eval_win_threshold:
-            print(f"   ✓ New model wins {win_rate:.1%}! Replacing best model.")
+            print(f"   ✓ New model wins {win_rate:.1%}! Replacing best model.", flush=True)
             self.best_model.load_state_dict(self.model.state_dict())
         else:
-            print(f"   ✗ New model only wins {win_rate:.1%}. Keeping old model.")
+            print(f"   ✗ New model only wins {win_rate:.1%}. Keeping old model.", flush=True)
             # Revert to best model
             self.model.load_state_dict(self.best_model.state_dict())
 
         # Step 5: Save checkpoint
         if self.iteration % self.config.save_interval == 0:
-            print("\n[5/5] Saving checkpoint...")
+            print("\n[5/5] Saving checkpoint...", flush=True)
             self._save_checkpoint()
 
         # Update learning rate
@@ -297,10 +297,10 @@ class Trainer:
         self.losses.append(metrics)
 
         if self.config.verbose:
-            print(f"   Trained on {len(buffer_list):,} positions")
-            print(f"   Total loss: {metrics['total_loss']:.4f}")
-            print(f"   Policy loss: {metrics['policy_loss']:.4f}")
-            print(f"   Value loss: {metrics['value_loss']:.4f}")
+            print(f"   Trained on {len(buffer_list):,} positions", flush=True)
+            print(f"   Total loss: {metrics['total_loss']:.4f}", flush=True)
+            print(f"   Policy loss: {metrics['policy_loss']:.4f}", flush=True)
+            print(f"   Value loss: {metrics['value_loss']:.4f}", flush=True)
 
         return metrics
 
@@ -351,7 +351,7 @@ class Trainer:
             if self.config.verbose and (game_num + 1) % 10 == 0:
                 current_win_rate = wins / (game_num + 1)
                 print(f"   Evaluated {game_num + 1}/{self.config.num_eval_games} games "
-                      f"(win rate: {current_win_rate:.1%})")
+                      f"(win rate: {current_win_rate:.1%})", flush=True)
 
         win_rate = wins / self.config.num_eval_games
 
