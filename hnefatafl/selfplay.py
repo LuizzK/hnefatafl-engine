@@ -77,9 +77,6 @@ class SelfPlayWorker:
         training_data = []
         move_count = 0
 
-        if verbose:
-            print("Starting self-play game...", flush=True)
-
         while not game.is_game_over() and move_count < max_moves:
             move_count += 1
 
@@ -100,8 +97,9 @@ class SelfPlayWorker:
             # Make the move
             game.make_move(move)
 
-            if verbose and move_count % 10 == 0:
-                print(f"  Move {move_count}...", flush=True)
+            if verbose and move_count % 5 == 0:
+                current_player = "Attacker" if game.current_player == Player.DEFENDER else "Defender"
+                print(f"    Move {move_count} ({current_player}'s turn)", flush=True)
 
         # Check if game hit move limit
         if move_count >= max_moves and not game.is_game_over():
@@ -155,20 +153,16 @@ class SelfPlayWorker:
         start_time = time.time()
 
         for game_num in range(num_games):
+            if verbose:
+                print(f"\n  Starting game {game_num + 1}/{num_games}...", flush=True)
+
             # Generate one game
-            game_examples = self.play_game(verbose=False)
+            game_examples = self.play_game(verbose=verbose)
             all_examples.extend(game_examples)
 
-            # Print progress
-            if verbose and (game_num + 1) % progress_interval == 0:
-                elapsed = time.time() - start_time
-                games_per_sec = (game_num + 1) / elapsed
-                print(f"Generated {game_num + 1}/{num_games} games "
-                      f"({games_per_sec:.2f} games/sec, "
-                      f"{len(all_examples)} total positions)", flush=True)
-            elif verbose:
-                # Print brief progress for every game
-                print(f"  Game {game_num + 1}/{num_games} complete ({len(game_examples)} moves)", flush=True)
+            if verbose:
+                result_str = game_examples[-1].value if game_examples else "unknown"
+                print(f"  ✓ Game {game_num + 1}/{num_games} complete: {len(game_examples)} moves", flush=True)
 
         if verbose:
             elapsed = time.time() - start_time
