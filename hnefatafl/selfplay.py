@@ -109,7 +109,8 @@ class SelfPlayWorker:
                 print(f"  Game reached max moves ({max_moves}), declaring draw", flush=True)
 
         # Get game outcome
-        result = game.get_result()
+        from .game import GameResult
+        result = game.result
         winner = game.get_winner()
 
         if verbose:
