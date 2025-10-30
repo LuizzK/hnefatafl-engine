@@ -60,6 +60,60 @@ class MVPTrainingConfig:
 
 
 @dataclass
+class GPUTestConfig:
+    """
+    Small GPU test config - verify GPU setup works.
+
+    This runs 5 iterations with 5 games each.
+    Games can go up to 1000 moves, with attackers winning on timeout
+    (simulates the advantage of numerical superiority in long games).
+
+    Time: ~30-60 minutes on GPU
+    Cost: ~$0.20-0.50
+    Purpose: Verify GPU works before committing to full training
+    """
+
+    # Self-play
+    num_simulations: int = 800  # Standard MCTS depth
+    num_games_per_iteration: int = 5  # 5 games per iteration
+    temperature_threshold: int = 15
+    dirichlet_alpha: float = 0.3
+    dirichlet_epsilon: float = 0.25
+    max_game_moves: int = 1000  # Long games allowed
+    attacker_timeout_win: bool = True  # Attackers win on timeout
+
+    # Training
+    replay_buffer_size: int = 50000
+    batch_size: int = 256  # Good GPU batch size
+    epochs_per_iteration: int = 10
+    learning_rate: float = 0.001
+    weight_decay: float = 1e-4
+    lr_decay_steps: int = 100
+    lr_decay_gamma: float = 0.95
+
+    # Evaluation
+    num_eval_games: int = 20  # Decent evaluation
+    eval_win_threshold: float = 0.55
+    eval_simulations: int = 400
+
+    # Model - standard size
+    num_channels: int = 128
+    num_res_blocks: int = 10
+
+    # Hardware
+    device: str = 'cpu'  # RTX 5090 needs PyTorch 2.7+ for CUDA sm_120 support
+    num_workers: int = 4
+
+    # Checkpointing
+    checkpoint_dir: str = "checkpoints_gpu_test"
+    save_interval: int = 2  # Save every 2 iterations
+
+    # Logging
+    log_interval: int = 1
+    verbose: bool = True
+
+
+@dataclass
 class QuickTrainingConfig:
     """
     Quick training config for testing (CPU-friendly).
@@ -205,13 +259,14 @@ def get_config(config_name: str = "standard"):
     Get training configuration by name.
 
     Args:
-        config_name: One of 'mvp', 'quick', 'standard', 'intense'
+        config_name: One of 'mvp', 'gpu_test', 'quick', 'standard', 'intense'
 
     Returns:
         Training configuration object
     """
     configs = {
         'mvp': MVPTrainingConfig(),
+        'gpu_test': GPUTestConfig(),
         'quick': QuickTrainingConfig(),
         'standard': StandardTrainingConfig(),
         'intense': IntenseTrainingConfig()

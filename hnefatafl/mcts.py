@@ -205,10 +205,12 @@ class MCTS:
         Returns:
             Tuple of (policy, value)
         """
+        from hnefatafl.game import get_policy_size
+
         if self.neural_network is None:
             # Random policy if no network
-            legal_moves = game_state.get_legal_moves()
-            policy = np.ones(4400) / 4400  # Uniform distribution
+            policy_size = get_policy_size()
+            policy = np.ones(policy_size) / policy_size  # Uniform distribution
             value = 0.0
         else:
             # Use neural network
@@ -266,7 +268,11 @@ class MCTS:
 
         Returns:
             Tuple of (best_move, move_probabilities)
+            - best_move: The selected move
+            - move_probabilities: Fixed-size policy vector of size 4840
         """
+        from hnefatafl.game import encode_move, get_policy_size
+
         visit_counts = []
         moves = []
 
@@ -294,14 +300,15 @@ class MCTS:
             best_idx = np.random.choice(len(moves), p=probs)
             best_move = moves[best_idx]
 
-        # Create full probability distribution over all moves (for training)
-        legal_moves = root.game_state.get_legal_moves()
-        full_probs = np.zeros(len(legal_moves))
+        # Create fixed-size probability distribution over ALL possible moves
+        # This is crucial for training - all policy vectors must be the same size
+        policy_size = get_policy_size()
+        full_probs = np.zeros(policy_size)
 
-        for i, move in enumerate(legal_moves):
-            if move in moves:
-                idx = moves.index(move)
-                full_probs[i] = probs[idx]
+        # Map the probabilities to their indices in the full policy vector
+        for i, move in enumerate(moves):
+            move_index = encode_move(move)
+            full_probs[move_index] = probs[i]
 
         return best_move, full_probs
 

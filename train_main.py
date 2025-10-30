@@ -45,7 +45,7 @@ Examples:
     parser.add_argument(
         '--config',
         type=str,
-        choices=['mvp', 'quick', 'standard', 'intense'],
+        choices=['mvp', 'gpu_test', 'quick', 'standard', 'intense'],
         default='standard',
         help='Training configuration preset (default: standard)'
     )

@@ -1012,3 +1012,86 @@ class HnefataflGame:
         elif self.result == GameResult.DRAW:
             return "Draw"
         return "Unknown result"
+
+
+# Move encoding functions for neural network policy
+# Policy vector size: 11 * 11 * 4 * 10 = 4840
+# Encoding: from_square (121) * direction (4) * distance (10)
+
+def encode_move(move: Move, board_size: int = 11) -> int:
+    """
+    Encode a move to an index in the policy vector.
+
+    Args:
+        move: Move to encode
+        board_size: Size of the board (default 11)
+
+    Returns:
+        Index in range [0, 4840)
+    """
+    from_square = move.from_row * board_size + move.from_col
+
+    # Determine direction and distance
+    dr = move.to_row - move.from_row
+    dc = move.to_col - move.from_col
+
+    if dr < 0:  # Moving up
+        direction = 0
+        distance = abs(dr)
+    elif dr > 0:  # Moving down
+        direction = 1
+        distance = abs(dr)
+    elif dc < 0:  # Moving left
+        direction = 2
+        distance = abs(dc)
+    else:  # Moving right (dc > 0)
+        direction = 3
+        distance = abs(dc)
+
+    # Encode: from_square * 40 + direction * 10 + (distance - 1)
+    index = from_square * 40 + direction * 10 + (distance - 1)
+
+    return index
+
+
+def decode_move(index: int, board_size: int = 11) -> Move:
+    """
+    Decode an index from the policy vector to a move.
+
+    Args:
+        index: Index in range [0, 4840)
+        board_size: Size of the board (default 11)
+
+    Returns:
+        Decoded move
+    """
+    # Decode components
+    from_square = index // 40
+    remainder = index % 40
+    direction = remainder // 10
+    distance = (remainder % 10) + 1
+
+    # Get from position
+    from_row = from_square // board_size
+    from_col = from_square % board_size
+
+    # Get to position based on direction
+    if direction == 0:  # Up
+        to_row = from_row - distance
+        to_col = from_col
+    elif direction == 1:  # Down
+        to_row = from_row + distance
+        to_col = from_col
+    elif direction == 2:  # Left
+        to_row = from_row
+        to_col = from_col - distance
+    else:  # direction == 3, Right
+        to_row = from_row
+        to_col = from_col + distance
+
+    return Move(from_row, from_col, to_row, to_col)
+
+
+def get_policy_size(board_size: int = 11) -> int:
+    """Get the size of the policy vector"""
+    return board_size * board_size * 4 * 10

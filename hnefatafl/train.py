@@ -211,12 +211,18 @@ class Trainer:
 
     def _generate_selfplay_games(self) -> List[TrainingExample]:
         """Generate self-play games using best model"""
+        # Get max_game_moves and attacker_timeout_win from config (with fallback defaults)
+        max_game_moves = getattr(self.config, 'max_game_moves', 200)
+        attacker_timeout_win = getattr(self.config, 'attacker_timeout_win', True)
+
         worker = SelfPlayWorker(
             model=self.best_model,
             num_simulations=self.config.num_simulations,
             temperature_threshold=self.config.temperature_threshold,
             dirichlet_alpha=self.config.dirichlet_alpha,
-            dirichlet_epsilon=self.config.dirichlet_epsilon
+            dirichlet_epsilon=self.config.dirichlet_epsilon,
+            max_game_moves=max_game_moves,
+            attacker_timeout_win=attacker_timeout_win
         )
 
         examples = worker.generate_games(

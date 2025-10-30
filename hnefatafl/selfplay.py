@@ -38,7 +38,9 @@ class SelfPlayWorker:
         num_simulations: int = 800,
         temperature_threshold: int = 15,
         dirichlet_alpha: float = 0.3,
-        dirichlet_epsilon: float = 0.25
+        dirichlet_epsilon: float = 0.25,
+        max_game_moves: int = 200,
+        attacker_timeout_win: bool = True
     ):
         """
         Initialize self-play worker.
@@ -49,12 +51,16 @@ class SelfPlayWorker:
             temperature_threshold: Move number after which to use greedy selection
             dirichlet_alpha: Alpha parameter for Dirichlet noise
             dirichlet_epsilon: Weight of Dirichlet noise in root node
+            max_game_moves: Maximum moves before ending game
+            attacker_timeout_win: If True, attackers win on timeout
         """
         self.model = model
         self.num_simulations = num_simulations
         self.temperature_threshold = temperature_threshold
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
+        self.max_game_moves = max_game_moves
+        self.attacker_timeout_win = attacker_timeout_win
         self.mcts = MCTS(
             neural_network=model,
             num_simulations=num_simulations,
@@ -62,17 +68,23 @@ class SelfPlayWorker:
             dirichlet_epsilon=dirichlet_epsilon
         )
 
-    def play_game(self, verbose: bool = False, max_moves: int = 200) -> List[TrainingExample]:
+    def play_game(self, verbose: bool = False, max_moves: int = None, attacker_timeout_win: bool = None) -> List[TrainingExample]:
         """
         Play one complete self-play game.
 
         Args:
             verbose: Print progress messages
-            max_moves: Maximum moves before declaring draw (prevents infinite games)
+            max_moves: Maximum moves before ending game (None = use self.max_game_moves)
+            attacker_timeout_win: If True, attackers win on timeout (None = use self.attacker_timeout_win)
 
         Returns:
             List of training examples (state, policy, outcome) for each move
         """
+        # Use instance defaults if not specified
+        if max_moves is None:
+            max_moves = self.max_game_moves
+        if attacker_timeout_win is None:
+            attacker_timeout_win = self.attacker_timeout_win
         game = HnefataflGame()
         training_data = []
         move_count = 0
@@ -103,8 +115,16 @@ class SelfPlayWorker:
 
         # Check if game hit move limit
         if move_count >= max_moves and not game.is_game_over():
-            if verbose:
-                print(f"  Game reached max moves ({max_moves}), declaring draw", flush=True)
+            if attacker_timeout_win:
+                # Attackers win if game goes too long (they have numerical advantage)
+                if verbose:
+                    print(f"  Game reached max moves ({max_moves}), attackers win by timeout", flush=True)
+                # Force attacker win by setting result manually
+                game.result = GameResult.ATTACKER_WIN
+            else:
+                # Draw
+                if verbose:
+                    print(f"  Game reached max moves ({max_moves}), declaring draw", flush=True)
 
         # Get game outcome
         from .game import GameResult
