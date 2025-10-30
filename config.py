@@ -27,6 +27,7 @@ class MVPTrainingConfig:
     temperature_threshold: int = 5
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
+    mcts_batch_size: int = 32  # Smaller batch for CPU
 
     # Training (tiny batches)
     replay_buffer_size: int = 1000
@@ -74,13 +75,14 @@ class GPUTestConfig:
     """
 
     # Self-play
-    num_simulations: int = 800  # Standard MCTS depth
+    num_simulations: int = 50  # Very fast for testing (was 200, production: 800)
     num_games_per_iteration: int = 5  # 5 games per iteration
     temperature_threshold: int = 15
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
-    max_game_moves: int = 1000  # Long games allowed
+    max_game_moves: int = 300  # Limit game length for faster testing
     attacker_timeout_win: bool = True  # Attackers win on timeout
+    mcts_batch_size: int = 128  # Batched GPU evaluation for 10-50x speedup!
 
     # Training
     replay_buffer_size: int = 50000
@@ -92,9 +94,9 @@ class GPUTestConfig:
     lr_decay_gamma: float = 0.95
 
     # Evaluation
-    num_eval_games: int = 20  # Decent evaluation
+    num_eval_games: int = 4  # Quick evaluation for testing
     eval_win_threshold: float = 0.55
-    eval_simulations: int = 400
+    eval_simulations: int = 50  # Match training simulations
 
     # Model - standard size
     num_channels: int = 128
@@ -128,6 +130,7 @@ class QuickTrainingConfig:
     temperature_threshold: int = 10
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
+    mcts_batch_size: int = 32  # CPU-friendly batch size
 
     # Training
     replay_buffer_size: int = 10000
@@ -175,6 +178,7 @@ class StandardTrainingConfig:
     temperature_threshold: int = 15
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
+    mcts_batch_size: int = 128  # Large batch for GPU efficiency
 
     # Training
     replay_buffer_size: int = 500000
@@ -222,6 +226,7 @@ class IntenseTrainingConfig:
     temperature_threshold: int = 15
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
+    mcts_batch_size: int = 256  # Very large batch for high-end GPU
 
     # Training
     replay_buffer_size: int = 1000000

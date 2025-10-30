@@ -29,14 +29,16 @@ class MCTSNode:
         self.children: Dict[Move, 'MCTSNode'] = {}
         self.visit_count = 0
         self.value_sum = 0.0
+        self.virtual_loss = 0  # For batched MCTS - prevents parallel searches from visiting same node
 
         self.is_expanded = False
 
     def get_value(self) -> float:
-        """Get average value (Q-value) of this node"""
+        """Get average value (Q-value) of this node, accounting for virtual loss"""
         if self.visit_count == 0:
             return 0.0
-        return self.value_sum / self.visit_count
+        # Virtual loss reduces Q-value to discourage parallel searches from picking same node
+        return (self.value_sum - self.virtual_loss) / self.visit_count
 
     def get_ucb_score(self, c_puct: float = 1.5, parent_visits: int = 1) -> float:
         """
@@ -119,7 +121,8 @@ class MCTS:
 
     def __init__(self, neural_network=None, num_simulations: int = 800,
                  c_puct: float = 1.5, temperature: float = 1.0,
-                 dirichlet_alpha: float = 0.3, dirichlet_epsilon: float = 0.25):
+                 dirichlet_alpha: float = 0.3, dirichlet_epsilon: float = 0.25,
+                 batch_size: int = 32):
         """
         Initialize MCTS.
 
@@ -130,6 +133,7 @@ class MCTS:
             temperature: Temperature for move selection (higher = more exploration)
             dirichlet_alpha: Alpha parameter for Dirichlet noise (for exploration)
             dirichlet_epsilon: Weight of Dirichlet noise in root node
+            batch_size: Number of positions to evaluate in parallel on GPU (default 32)
         """
         self.neural_network = neural_network
         self.num_simulations = num_simulations
@@ -137,10 +141,11 @@ class MCTS:
         self.temperature = temperature
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
+        self.batch_size = batch_size
 
     def search(self, game_state: HnefataflGame, temperature: Optional[float] = None) -> Tuple[Move, np.ndarray]:
         """
-        Run MCTS from the given game state.
+        Run MCTS from the given game state with batched neural network evaluation.
 
         Args:
             game_state: Current game state
@@ -158,36 +163,79 @@ class MCTS:
 
         root = MCTSNode(game_state)
 
-        # Run simulations
-        for _ in range(self.num_simulations):
-            node = root
-            search_path = [node]
+        # Run simulations in batches for GPU efficiency
+        # Use mini-batches proportional to total simulations to ensure tree growth
+        mini_batch_size = min(self.batch_size, max(8, self.num_simulations // 10))  # Scale with total sims
+        sims_completed = 0
 
-            # Selection: traverse tree using UCB until we reach a leaf
-            while not node.is_leaf() and not node.game_state.is_game_over():
-                node = node.select_child(self.c_puct)
-                search_path.append(node)
+        while sims_completed < self.num_simulations:
+            # Determine how many simulations in this mini-batch
+            current_batch_size = min(mini_batch_size, self.num_simulations - sims_completed)
 
-            # Check if game is over
-            if node.game_state.is_game_over():
-                # Terminal node
-                value = self._get_terminal_value(node.game_state, root.game_state.current_player)
-            else:
-                # Expansion and evaluation
-                legal_moves = node.game_state.get_legal_moves()
+            # Collect leaf nodes for batch evaluation
+            leaf_nodes = []
+            search_paths = []
 
-                if len(legal_moves) == 0:
-                    # No legal moves (shouldn't happen if game logic is correct)
-                    value = -1.0
+            for _ in range(current_batch_size):
+                node = root
+                search_path = [node]
+
+                # Selection: traverse tree using UCB until we reach a leaf
+                while not node.is_leaf() and not node.game_state.is_game_over():
+                    node = node.select_child(self.c_puct)
+                    search_path.append(node)
+
+                # Apply virtual loss to prevent other parallel searches from picking same path
+                for path_node in search_path:
+                    path_node.virtual_loss += 1
+
+                leaf_nodes.append(node)
+                search_paths.append(search_path)
+
+            # Separate terminal and non-terminal nodes
+            terminal_results = []
+            non_terminal_nodes = []
+            non_terminal_indices = []
+
+            for i, node in enumerate(leaf_nodes):
+                if node.game_state.is_game_over():
+                    value = self._get_terminal_value(node.game_state, root.game_state.current_player)
+                    terminal_results.append((i, value, None, None))
                 else:
-                    # Get neural network policy and value
-                    policy, value = self._evaluate_position(node.game_state)
+                    legal_moves = node.game_state.get_legal_moves()
+                    if len(legal_moves) == 0:
+                        terminal_results.append((i, -1.0, None, None))
+                    else:
+                        non_terminal_nodes.append(node)
+                        non_terminal_indices.append(i)
 
-                    # Expand node
-                    node.expand(policy, legal_moves)
+            # Batch evaluate non-terminal positions (THIS is where GPU batching happens!)
+            if non_terminal_nodes:
+                policies, values = self._evaluate_positions_batch(non_terminal_nodes)
 
-            # Backpropagation
-            self._backpropagate(search_path, value, root.game_state.current_player)
+                # Expand nodes
+                for idx, node in enumerate(non_terminal_nodes):
+                    legal_moves = node.game_state.get_legal_moves()
+                    node.expand(policies[idx], legal_moves)
+
+            # Backpropagate all results
+            for i, search_path in enumerate(search_paths):
+                # Get value for this node
+                if any(result[0] == i for result in terminal_results):
+                    # Terminal node
+                    value = next(result[1] for result in terminal_results if result[0] == i)
+                else:
+                    # Non-terminal node - find it in our batch results
+                    batch_idx = non_terminal_indices.index(i)
+                    value = values[batch_idx]
+
+                # Remove virtual loss and backpropagate
+                for path_node in search_path:
+                    path_node.virtual_loss -= 1
+
+                self._backpropagate(search_path, value, root.game_state.current_player)
+
+            sims_completed += current_batch_size
 
         # Select move based on visit counts
         result = self._select_move(root)
@@ -200,7 +248,7 @@ class MCTS:
 
     def _evaluate_position(self, game_state: HnefataflGame) -> Tuple[np.ndarray, float]:
         """
-        Evaluate position using neural network.
+        Evaluate single position using neural network (legacy method, prefer batch version).
 
         Returns:
             Tuple of (policy, value)
@@ -224,6 +272,53 @@ class MCTS:
             policy = policy.cpu().numpy()
 
         return policy, value
+
+    def _evaluate_positions_batch(self, nodes: List[MCTSNode]) -> Tuple[List[np.ndarray], List[float]]:
+        """
+        Evaluate multiple positions in a single batched GPU call (MUCH faster!).
+
+        Args:
+            nodes: List of MCTSNode objects to evaluate
+
+        Returns:
+            Tuple of (policies, values) where each is a list matching input nodes
+        """
+        from hnefatafl.game import get_policy_size
+        import torch
+        import torch.nn.functional as F
+
+        if not nodes:
+            return [], []
+
+        if self.neural_network is None:
+            # Random policy if no network
+            policy_size = get_policy_size()
+            policies = [np.ones(policy_size) / policy_size for _ in nodes]
+            values = [0.0 for _ in nodes]
+            return policies, values
+
+        # Batch encode all game states
+        states = np.array([node.game_state.encode_state() for node in nodes])
+        state_tensor = torch.FloatTensor(states)
+
+        if torch.cuda.is_available():
+            state_tensor = state_tensor.cuda()
+
+        # Single batched neural network call - this is the KEY optimization!
+        self.neural_network.eval()
+        with torch.no_grad():
+            policy_logits, value_tensor = self.neural_network.forward(state_tensor)
+            policy_probs = F.softmax(policy_logits, dim=1)
+
+        # Convert to numpy
+        policies_np = policy_probs.cpu().numpy()
+        values_np = value_tensor.cpu().numpy().flatten()
+
+        # Split batch results back into individual predictions
+        policies = [policies_np[i] for i in range(len(nodes))]
+        values = [float(values_np[i]) for i in range(len(nodes))]
+
+        return policies, values
 
     def _get_terminal_value(self, game_state: HnefataflGame, root_player: Player) -> float:
         """

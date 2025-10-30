@@ -214,6 +214,7 @@ class Trainer:
         # Get max_game_moves and attacker_timeout_win from config (with fallback defaults)
         max_game_moves = getattr(self.config, 'max_game_moves', 200)
         attacker_timeout_win = getattr(self.config, 'attacker_timeout_win', True)
+        batch_size = getattr(self.config, 'mcts_batch_size', 32)
 
         worker = SelfPlayWorker(
             model=self.best_model,
@@ -222,7 +223,8 @@ class Trainer:
             dirichlet_alpha=self.config.dirichlet_alpha,
             dirichlet_epsilon=self.config.dirichlet_epsilon,
             max_game_moves=max_game_moves,
-            attacker_timeout_win=attacker_timeout_win
+            attacker_timeout_win=attacker_timeout_win,
+            batch_size=batch_size
         )
 
         examples = worker.generate_games(
@@ -320,13 +322,17 @@ class Trainer:
         self.model.eval()
         self.best_model.eval()
 
+        batch_size = getattr(self.config, 'mcts_batch_size', 32)
+
         new_mcts = MCTS(
             neural_network=self.model,
-            num_simulations=self.config.eval_simulations
+            num_simulations=self.config.eval_simulations,
+            batch_size=batch_size
         )
         old_mcts = MCTS(
             neural_network=self.best_model,
-            num_simulations=self.config.eval_simulations
+            num_simulations=self.config.eval_simulations,
+            batch_size=batch_size
         )
 
         wins = 0

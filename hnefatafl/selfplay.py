@@ -40,7 +40,8 @@ class SelfPlayWorker:
         dirichlet_alpha: float = 0.3,
         dirichlet_epsilon: float = 0.25,
         max_game_moves: int = 200,
-        attacker_timeout_win: bool = True
+        attacker_timeout_win: bool = True,
+        batch_size: int = 32
     ):
         """
         Initialize self-play worker.
@@ -53,6 +54,7 @@ class SelfPlayWorker:
             dirichlet_epsilon: Weight of Dirichlet noise in root node
             max_game_moves: Maximum moves before ending game
             attacker_timeout_win: If True, attackers win on timeout
+            batch_size: Number of positions to evaluate in parallel on GPU
         """
         self.model = model
         self.num_simulations = num_simulations
@@ -65,7 +67,8 @@ class SelfPlayWorker:
             neural_network=model,
             num_simulations=num_simulations,
             dirichlet_alpha=dirichlet_alpha,
-            dirichlet_epsilon=dirichlet_epsilon
+            dirichlet_epsilon=dirichlet_epsilon,
+            batch_size=batch_size
         )
 
     def play_game(self, verbose: bool = False, max_moves: int = None, attacker_timeout_win: bool = None) -> List[TrainingExample]:
@@ -88,6 +91,7 @@ class SelfPlayWorker:
         game = HnefataflGame()
         training_data = []
         move_count = 0
+        moves_played = []  # Track all moves for display
 
         while not game.is_game_over() and move_count < max_moves:
             move_count += 1
@@ -105,6 +109,9 @@ class SelfPlayWorker:
                 policy=policy,
                 value=0.0  # Placeholder
             ))
+
+            # Track move for display
+            moves_played.append(move)
 
             # Make the move
             game.make_move(move)
@@ -133,6 +140,17 @@ class SelfPlayWorker:
 
         if verbose:
             print(f"  Game ended after {move_count} moves - {game.get_result_string()}", flush=True)
+            # Display move history
+            print(f"  Moves: ", end="", flush=True)
+            move_strs = []
+            for i, move in enumerate(moves_played):
+                # Convert to chess-like notation (e.g., "d1-d3")
+                from_col_str = chr(ord('a') + move.from_col)
+                from_row_str = str(move.from_row + 1)
+                to_col_str = chr(ord('a') + move.to_col)
+                to_row_str = str(move.to_row + 1)
+                move_strs.append(f"{from_col_str}{from_row_str}-{to_col_str}{to_row_str}")
+            print(" ".join(move_strs), flush=True)
 
         # Assign outcomes to all positions
         # Outcome is from perspective of player at that position
