@@ -84,7 +84,8 @@ def test_mcts_node():
     # Expand node
     legal_moves = game.get_legal_moves()
     import numpy as np
-    policy = np.ones(len(legal_moves)) / len(legal_moves)
+    from hnefatafl.game import get_policy_size
+    policy = np.ones(get_policy_size()) / get_policy_size()
     root.expand(policy, legal_moves)
 
     print(f"✓ Node expanded with {len(root.children)} children")

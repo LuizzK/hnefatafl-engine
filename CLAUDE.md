@@ -84,7 +84,7 @@ Copenhagen Hnefatafl AlphaZero engine - a neural network-based game engine that 
 **hnefatafl/game.py** - Game engine and rules
 - `HnefataflGame` class: Complete game state and rule implementation
 - Board representation: 11x11 numpy array with piece types (EMPTY=0, ATTACKER=1, DEFENDER=2, KING=3)
-- Move encoding: Flattened 11x11x11x11 array (from_row, from_col, to_row, to_col)
+- Move encoding: 4840-dim vector indexed as `from_square * 40 + direction * 10 + (distance - 1)` where direction ∈ {0=up,1=down,2=left,3=right} and distance ∈ [1,10]. Pieces move only orthogonally (rook-like).
 - Special rules: Shieldwall capture, edge forts (4+ defenders on edge = win), king capture (4-sided or 3-sided near throne)
 - Win detection: King reaches corner, attackers capture king, edge fort formation, or move repetition/stalemate
 
@@ -93,7 +93,7 @@ Copenhagen Hnefatafl AlphaZero engine - a neural network-based game engine that 
 - Input: 15-channel 11x11 board representation (piece positions, legal moves, historical features)
 - Output: Policy head (move probabilities), Value head (position evaluation -1 to 1)
 - Configurable size: num_channels (32-256), num_res_blocks (2-20)
-- Policy output: 14641-dim flattened tensor (11x11x11x11 for all from-to combinations, illegal moves masked)
+- Policy output: 4840-dim vector (121 squares × 4 directions × 10 distances); illegal-move indices are pruned during MCTS expansion (priors only assigned to legal moves, then renormalized)
 
 **hnefatafl/mcts.py** - Monte Carlo Tree Search
 - PUCT algorithm: UCB = Q + c_puct * P * sqrt(parent_N) / (1 + N)
@@ -144,10 +144,15 @@ Key parameters:
 ## Critical Implementation Details
 
 ### Move Encoding
-- Moves encoded as 4-tuple: (from_row, from_col, to_row, to_col)
-- Flattened to single index: `from_row * 11^3 + from_col * 11^2 + to_row * 11 + to_col`
-- Total action space: 11x11x11x11 = 14641 possible moves
-- Network outputs 14641-dim vector, illegal moves masked to zero before MCTS
+- Moves represented as 4-tuple: (from_row, from_col, to_row, to_col)
+- Encoded as `from_square * 40 + direction * 10 + (distance - 1)` where `from_square = from_row * 11 + from_col`, direction ∈ {0=up, 1=down, 2=left, 3=right}, distance ∈ [1, 10] — see `hnefatafl/game.py:encode_move`
+- Total action space: 121 × 4 × 10 = 4840 possible moves (Copenhagen Hnefatafl uses rook-like movement only)
+- Network outputs 4840-dim vector; MCTS picks priors via `encode_move(move)` index and renormalizes over legal moves (illegal-index mass is dropped)
+
+### Dirichlet Noise
+- Added to root priors at the start of every self-play MCTS search (`MCTS.search(..., add_noise=True)`)
+- Defaults: `alpha=0.3`, `epsilon=0.25`
+- **Never** applied during evaluation (`_play_evaluation_game` in train.py) — evaluation uses greedy visit-count selection with clean priors
 
 ### Board State Representation (15 channels)
 1. Current player's pieces (binary)

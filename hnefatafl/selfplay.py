@@ -11,8 +11,96 @@ from typing import List, Tuple, Optional
 from dataclasses import dataclass
 import time
 
-from .game import HnefataflGame, Move, Player, GameResult
+from .game import HnefataflGame, Move, Player, GameResult, get_policy_size
 from .mcts import MCTS
+
+
+# ---------------------------------------------------------------------------
+# Board-symmetry utilities for data augmentation
+#
+# Copenhagen Hnefatafl has the full dihedral-8 symmetry group on the 11x11
+# board with symmetric starting position. Each symmetry g maps (r, c) -> (r', c')
+# and transforms rook-move directions consistently; distances are invariant.
+# We precompute a 4840-length index permutation per symmetry once at import.
+# ---------------------------------------------------------------------------
+
+_BOARD_SIZE = 11
+
+_POINT_XFORM = {
+    'e':  lambda r, c, B: (r, c),
+    'r1': lambda r, c, B: (B - c, r),
+    'r2': lambda r, c, B: (B - r, B - c),
+    'r3': lambda r, c, B: (c, B - r),
+    'fh': lambda r, c, B: (r, B - c),
+    'fv': lambda r, c, B: (B - r, c),
+    'td': lambda r, c, B: (c, r),
+    'ta': lambda r, c, B: (B - c, B - r),
+}
+
+# direction IDs: 0=up, 1=down, 2=left, 3=right
+# Derived from how displacements transform under each symmetry:
+# r1 (90 CCW): (dr, dc) -> (-dc, dr)  => [2, 3, 1, 0]
+# r2 (180):    (dr, dc) -> (-dr, -dc) => [1, 0, 3, 2]
+# r3 (270 CCW): (dr, dc) -> (dc, -dr) => [3, 2, 0, 1]
+# fh (flip h): (dr, dc) -> (dr, -dc)  => [0, 1, 3, 2]
+# fv (flip v): (dr, dc) -> (-dr, dc)  => [1, 0, 2, 3]
+# td (transpose): (dr, dc) -> (dc, dr) => [2, 3, 0, 1]
+# ta (anti-diag): (dr, dc) -> (-dc, -dr) => [3, 2, 1, 0]
+_DIR_MAP = {
+    'e':  [0, 1, 2, 3],
+    'r1': [2, 3, 1, 0],
+    'r2': [1, 0, 3, 2],
+    'r3': [3, 2, 0, 1],
+    'fh': [0, 1, 3, 2],
+    'fv': [1, 0, 2, 3],
+    'td': [2, 3, 0, 1],
+    'ta': [3, 2, 1, 0],
+}
+
+
+def _build_symmetry_perms(N: int = _BOARD_SIZE):
+    B = N - 1
+    perms = {}
+    size = N * N * 4 * 10
+    for name in _POINT_XFORM:
+        perm = np.empty(size, dtype=np.int64)
+        for from_sq in range(N * N):
+            r, c = divmod(from_sq, N)
+            r2, c2 = _POINT_XFORM[name](r, c, B)
+            new_from = r2 * N + c2
+            for d in range(4):
+                new_d = _DIR_MAP[name][d]
+                for dist in range(1, 11):
+                    old_idx = from_sq * 40 + d * 10 + (dist - 1)
+                    new_idx = new_from * 40 + new_d * 10 + (dist - 1)
+                    perm[old_idx] = new_idx
+        perms[name] = perm
+    return perms
+
+
+_SYMMETRY_PERMS = _build_symmetry_perms()
+
+SYM_STATE_OPS = {
+    'e':  lambda s: s,
+    'r1': lambda s: np.rot90(s, k=1, axes=(1, 2)),
+    'r2': lambda s: np.rot90(s, k=2, axes=(1, 2)),
+    'r3': lambda s: np.rot90(s, k=3, axes=(1, 2)),
+    'fh': lambda s: np.flip(s, axis=2),
+    'fv': lambda s: np.flip(s, axis=1),
+    'td': lambda s: np.transpose(s, (0, 2, 1)),
+    'ta': lambda s: np.flip(np.transpose(s, (0, 2, 1)), axis=(1, 2)),
+}
+
+SYM_NAMES = ('e', 'r1', 'r2', 'r3', 'fh', 'fv', 'td', 'ta')
+
+
+def apply_symmetry(state: np.ndarray, policy: np.ndarray, name: str):
+    """Apply dihedral symmetry `name` to (state, policy)."""
+    new_state = np.ascontiguousarray(SYM_STATE_OPS[name](state))
+    perm = _SYMMETRY_PERMS[name]
+    new_policy = np.zeros_like(policy)
+    new_policy[perm] = policy
+    return new_state, new_policy
 
 
 @dataclass
@@ -101,7 +189,7 @@ class SelfPlayWorker:
 
             # Run MCTS to get move and policy
             temperature = 1.0 if move_count <= self.temperature_threshold else 0.1
-            move, policy = self.mcts.search(game, temperature=temperature)
+            move, policy = self.mcts.search(game, temperature=temperature, add_noise=True)
 
             # Store training example (outcome will be filled in later)
             training_data.append(TrainingExample(
@@ -134,7 +222,6 @@ class SelfPlayWorker:
                     print(f"  Game reached max moves ({max_moves}), declaring draw", flush=True)
 
         # Get game outcome
-        from .game import GameResult
         result = game.result
         winner = game.get_winner()
 
@@ -212,10 +299,11 @@ class SelfPlayWorker:
 
     def augment_data(self, examples: List[TrainingExample]) -> List[TrainingExample]:
         """
-        Augment training data with board symmetries.
+        Augment training data with the 8 dihedral board symmetries.
 
-        Copenhagen Hnefatafl has 4-fold rotational symmetry and 4 reflections,
-        giving 8 symmetric positions for each board state.
+        For each example, produce 8 training examples by applying every element
+        of the dihedral-8 group to both state and policy. Distances are invariant;
+        directions and from-squares are transformed via precomputed permutations.
 
         Args:
             examples: Original training examples
@@ -224,79 +312,11 @@ class SelfPlayWorker:
             Augmented training examples (8x larger)
         """
         augmented = []
-
         for example in examples:
-            state = example.state
-            policy = example.policy
-            value = example.value
-
-            # Original
-            augmented.append(TrainingExample(state, policy, value))
-
-            # Rotate 90 degrees
-            state_90 = np.rot90(state, k=1, axes=(1, 2))
-            policy_90 = self._rotate_policy(policy, k=1)
-            augmented.append(TrainingExample(state_90, policy_90, value))
-
-            # Rotate 180 degrees
-            state_180 = np.rot90(state, k=2, axes=(1, 2))
-            policy_180 = self._rotate_policy(policy, k=2)
-            augmented.append(TrainingExample(state_180, policy_180, value))
-
-            # Rotate 270 degrees
-            state_270 = np.rot90(state, k=3, axes=(1, 2))
-            policy_270 = self._rotate_policy(policy, k=3)
-            augmented.append(TrainingExample(state_270, policy_270, value))
-
-            # Horizontal flip
-            state_h = np.flip(state, axis=2)
-            policy_h = self._flip_policy_horizontal(policy)
-            augmented.append(TrainingExample(state_h, policy_h, value))
-
-            # Vertical flip
-            state_v = np.flip(state, axis=1)
-            policy_v = self._flip_policy_vertical(policy)
-            augmented.append(TrainingExample(state_v, policy_v, value))
-
-            # Diagonal flip (transpose)
-            state_d1 = np.transpose(state, (0, 2, 1))
-            policy_d1 = self._transpose_policy(policy)
-            augmented.append(TrainingExample(state_d1, policy_d1, value))
-
-            # Anti-diagonal flip
-            state_d2 = np.flip(np.transpose(state, (0, 2, 1)), axis=(1, 2))
-            policy_d2 = self._flip_policy_horizontal(self._flip_policy_vertical(
-                self._transpose_policy(policy)))
-            augmented.append(TrainingExample(state_d2, policy_d2, value))
-
+            for name in SYM_NAMES:
+                new_state, new_policy = apply_symmetry(example.state, example.policy, name)
+                augmented.append(TrainingExample(new_state, new_policy, example.value))
         return augmented
-
-    def _rotate_policy(self, policy: np.ndarray, k: int) -> np.ndarray:
-        """
-        Rotate policy vector by k*90 degrees.
-
-        Policy is a flat vector of move probabilities. We need to reshape it
-        to the board dimensions, rotate, and flatten back.
-        """
-        # TODO: Implement policy rotation
-        # This is complex because policy encodes moves, not just board positions
-        # For now, return original policy
-        return policy
-
-    def _flip_policy_horizontal(self, policy: np.ndarray) -> np.ndarray:
-        """Flip policy horizontally"""
-        # TODO: Implement policy flipping
-        return policy
-
-    def _flip_policy_vertical(self, policy: np.ndarray) -> np.ndarray:
-        """Flip policy vertically"""
-        # TODO: Implement policy flipping
-        return policy
-
-    def _transpose_policy(self, policy: np.ndarray) -> np.ndarray:
-        """Transpose policy"""
-        # TODO: Implement policy transposition
-        return policy
 
 
 class ParallelSelfPlay:

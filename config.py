@@ -28,6 +28,7 @@ class MVPTrainingConfig:
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
     mcts_batch_size: int = 32  # Smaller batch for CPU
+    augment_symmetries: bool = True  # 8x data via dihedral symmetries
 
     # Training (tiny batches)
     replay_buffer_size: int = 1000
@@ -83,6 +84,7 @@ class GPUTestConfig:
     max_game_moves: int = 300  # Limit game length for faster testing
     attacker_timeout_win: bool = True  # Attackers win on timeout
     mcts_batch_size: int = 128  # Batched GPU evaluation for 10-50x speedup!
+    augment_symmetries: bool = True  # 8x data via dihedral symmetries
 
     # Training
     replay_buffer_size: int = 50000
@@ -103,7 +105,7 @@ class GPUTestConfig:
     num_res_blocks: int = 10
 
     # Hardware
-    device: str = 'cpu'  # RTX 5090 needs PyTorch 2.7+ for CUDA sm_120 support
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
     num_workers: int = 4
 
     # Checkpointing
@@ -131,6 +133,7 @@ class QuickTrainingConfig:
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
     mcts_batch_size: int = 32  # CPU-friendly batch size
+    augment_symmetries: bool = True  # 8x data via dihedral symmetries
 
     # Training
     replay_buffer_size: int = 10000
@@ -179,6 +182,7 @@ class StandardTrainingConfig:
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
     mcts_batch_size: int = 128  # Large batch for GPU efficiency
+    augment_symmetries: bool = True  # 8x data via dihedral symmetries
 
     # Training
     replay_buffer_size: int = 500000
@@ -227,6 +231,7 @@ class IntenseTrainingConfig:
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
     mcts_batch_size: int = 256  # Very large batch for high-end GPU
+    augment_symmetries: bool = True  # 8x data via dihedral symmetries
 
     # Training
     replay_buffer_size: int = 1000000

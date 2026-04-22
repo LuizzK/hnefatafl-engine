@@ -76,23 +76,35 @@ class MCTSNode:
         """
         Expand node by creating children for all legal moves.
 
+        Priors are drawn from the neural network policy vector indexed by
+        encode_move(move), clipped to non-negative, and renormalized over
+        legal moves. Falls back to uniform if the legal mass is ~0
+        (untrained network edge case).
+
         Args:
-            policy_probs: Policy probabilities from neural network
+            policy_probs: Policy probabilities from neural network (size get_policy_size())
             legal_moves: List of legal moves from this position
         """
+        from hnefatafl.game import encode_move, get_policy_size
+
         if self.is_expanded:
             return
 
-        for move in legal_moves:
-            # Create child node
+        assert policy_probs.shape == (get_policy_size(),), \
+            f"expected policy size {get_policy_size()}, got {policy_probs.shape}"
+
+        legal_indices = np.array([encode_move(m) for m in legal_moves], dtype=np.int64)
+        legal_priors = np.maximum(policy_probs[legal_indices].astype(np.float64), 0.0)
+        total = legal_priors.sum()
+        if total > 1e-8:
+            legal_priors /= total
+        else:
+            legal_priors = np.full(len(legal_moves), 1.0 / len(legal_moves), dtype=np.float64)
+
+        for move, prior in zip(legal_moves, legal_priors):
             child_game = self.game_state.copy()
             child_game.make_move(move)
-
-            # Get prior probability for this move
-            # For now, use uniform distribution (will be improved with proper move encoding)
-            prior_prob = 1.0 / len(legal_moves)
-
-            child_node = MCTSNode(child_game, parent=self, prior_prob=prior_prob, move=move)
+            child_node = MCTSNode(child_game, parent=self, prior_prob=float(prior), move=move)
             self.children[move] = child_node
 
         self.is_expanded = True
@@ -143,13 +155,15 @@ class MCTS:
         self.dirichlet_epsilon = dirichlet_epsilon
         self.batch_size = batch_size
 
-    def search(self, game_state: HnefataflGame, temperature: Optional[float] = None) -> Tuple[Move, np.ndarray]:
+    def search(self, game_state: HnefataflGame, temperature: Optional[float] = None,
+               add_noise: bool = False) -> Tuple[Move, np.ndarray]:
         """
         Run MCTS from the given game state with batched neural network evaluation.
 
         Args:
             game_state: Current game state
             temperature: Temperature for move selection (overrides default if provided)
+            add_noise: If True, add Dirichlet noise to root priors (self-play only)
 
         Returns:
             Tuple of (best_move, move_probabilities)
@@ -162,6 +176,21 @@ class MCTS:
             self.temperature = temperature
 
         root = MCTSNode(game_state)
+
+        # Pre-expand the root so Dirichlet noise (if enabled) is applied before
+        # any simulation selects a child. Adds one NN eval per move.
+        if not root.game_state.is_game_over():
+            root_legal = root.game_state.get_legal_moves()
+            if root_legal:
+                root_policies, root_values = self._evaluate_positions_batch([root])
+                root.expand(root_policies[0], root_legal)
+                if add_noise:
+                    add_dirichlet_noise(
+                        root,
+                        epsilon=self.dirichlet_epsilon,
+                        alpha=self.dirichlet_alpha,
+                    )
+                self._backpropagate([root], float(root_values[0]), root.game_state.current_player)
 
         # Run simulations in batches for GPU efficiency
         # Use mini-batches proportional to total simulations to ensure tree growth

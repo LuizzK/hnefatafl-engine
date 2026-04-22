@@ -233,6 +233,12 @@ class Trainer:
             progress_interval=1  # Show progress every game (was 10)
         )
 
+        if getattr(self.config, 'augment_symmetries', True):
+            before = len(examples)
+            examples = worker.augment_data(examples)
+            if self.config.verbose:
+                print(f"   Augmented {before} positions -> {len(examples)} (8x symmetries)", flush=True)
+
         return examples
 
     def _train_network(self) -> Dict[str, float]:
