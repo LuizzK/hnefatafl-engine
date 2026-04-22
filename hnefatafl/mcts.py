@@ -192,9 +192,11 @@ class MCTS:
                     )
                 self._backpropagate([root], float(root_values[0]), root.game_state.current_player)
 
-        # Run simulations in batches for GPU efficiency
-        # Use mini-batches proportional to total simulations to ensure tree growth
-        mini_batch_size = min(self.batch_size, max(8, self.num_simulations // 10))  # Scale with total sims
+        # Run simulations in batches for GPU efficiency.
+        # Use the full configured batch_size — virtual loss keeps parallel
+        # paths distinct, so larger mini-batches are fine and amortize the
+        # per-call GPU launch overhead.
+        mini_batch_size = min(self.batch_size, self.num_simulations)
         sims_completed = 0
 
         while sims_completed < self.num_simulations:

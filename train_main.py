@@ -18,6 +18,10 @@ import torch
 from hnefatafl.train import Trainer, TrainingConfig
 from config import get_config, print_config_comparison
 
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision('high')
+
 
 def main():
     parser = argparse.ArgumentParser(
