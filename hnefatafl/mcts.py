@@ -294,8 +294,8 @@ class MCTS:
             import torch
             state_tensor = torch.FloatTensor(game_state.encode_state()).unsqueeze(0)
 
-            if torch.cuda.is_available():
-                state_tensor = state_tensor.cuda()
+            model_device = next(self.neural_network.parameters()).device
+            state_tensor = state_tensor.to(model_device)
 
             policy, value = self.neural_network.predict(state_tensor)
             policy = policy.cpu().numpy()
@@ -330,8 +330,8 @@ class MCTS:
         states = np.array([node.game_state.encode_state() for node in nodes])
         state_tensor = torch.FloatTensor(states)
 
-        if torch.cuda.is_available():
-            state_tensor = state_tensor.cuda()
+        model_device = next(self.neural_network.parameters()).device
+        state_tensor = state_tensor.to(model_device)
 
         # Single batched neural network call - this is the KEY optimization!
         self.neural_network.eval()
