@@ -61,6 +61,7 @@ class HnefataflNetwork(nn.Module):
 
         self.board_size = board_size
         self.num_channels = num_channels
+        self.num_res_blocks = num_res_blocks
 
         # Initial conv layer
         self.conv_input = nn.Conv2d(15, num_channels, kernel_size=3, padding=1)

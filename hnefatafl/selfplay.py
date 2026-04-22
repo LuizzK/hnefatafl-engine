@@ -111,6 +111,44 @@ class TrainingExample:
     value: float  # Game outcome from this player's perspective
 
 
+# --- Multiprocessing helpers (must be module-level for pickling). -----
+# Each spawned worker loads the model once in _mp_init_worker, then
+# plays one game per dispatch via _mp_run_one_game.
+_MP_WORKER_STATE: dict = {}
+
+
+def _mp_init_worker(state_dict, model_config, sp_config):
+    """Pool initializer: build model on the worker's GPU slot and stash
+    everything the worker needs to play games."""
+    import os
+    import numpy as np
+    import torch
+    from .network import create_model
+
+    seed = (os.getpid() * 2654435761 + int(time.time() * 1e6)) & 0x7FFFFFFF
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    model = create_model(
+        num_channels=model_config['num_channels'],
+        num_res_blocks=model_config['num_res_blocks'],
+        device=model_config['device'],
+    )
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    _MP_WORKER_STATE['model'] = model
+    _MP_WORKER_STATE['sp_config'] = sp_config
+
+
+def _mp_run_one_game(_game_idx):
+    """Play one self-play game inside the worker process."""
+    model = _MP_WORKER_STATE['model']
+    sp_config = _MP_WORKER_STATE['sp_config']
+    worker = SelfPlayWorker(model=model, **sp_config)
+    return worker.play_game(verbose=False)
+
+
 class SelfPlayWorker:
     """
     Generate self-play games for training.
@@ -313,70 +351,55 @@ class SelfPlayWorker:
         verbose: bool = False,
     ) -> List[TrainingExample]:
         """
-        Run self-play games concurrently using threads + a shared
-        BatchEvaluator. The GIL does not block us because all heavy work
-        (NN forward pass) happens inside torch C++ and releases the GIL.
+        Run self-play games in parallel subprocesses. Each worker owns its
+        own model copy on the same GPU; CUDA's scheduler multiplexes the
+        small NN calls across processes, which is what lets the GPU get
+        useful work out of a Python-bound MCTS loop.
+
+        We use multiprocessing (not threads) because the MCTS tree walk is
+        pure Python and the GIL would serialize it back to a single core.
         """
-        import threading
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from .mcts import BatchEvaluator
+        import torch
+        import torch.multiprocessing as mp
 
         if self.model is None:
             raise RuntimeError("concurrent self-play requires a model")
 
-        evaluator = self.batch_evaluator or BatchEvaluator(
-            self.model, max_batch=max(512, num_parallel * self.mcts.batch_size)
-        )
-        owns_evaluator = self.batch_evaluator is None
+        ctx = mp.get_context('spawn')
+        device = next(self.model.parameters()).device
+        state_dict = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
+        model_config = {
+            'num_channels': getattr(self.model, 'num_channels', 128),
+            'num_res_blocks': getattr(self.model, 'num_res_blocks', 10),
+            'device': 'cuda' if device.type == 'cuda' else 'cpu',
+        }
+        sp_config = {
+            'num_simulations': self.num_simulations,
+            'temperature_threshold': self.temperature_threshold,
+            'dirichlet_alpha': self.dirichlet_alpha,
+            'dirichlet_epsilon': self.dirichlet_epsilon,
+            'max_game_moves': self.max_game_moves,
+            'attacker_timeout_win': self.attacker_timeout_win,
+            'batch_size': self.mcts.batch_size,
+        }
 
-        # Per-thread workers share the model + evaluator. Each has its own
-        # MCTS tree state; they coordinate only at the NN boundary.
-        workers = [
-            SelfPlayWorker(
-                model=self.model,
-                num_simulations=self.num_simulations,
-                temperature_threshold=self.temperature_threshold,
-                dirichlet_alpha=self.dirichlet_alpha,
-                dirichlet_epsilon=self.dirichlet_epsilon,
-                max_game_moves=self.max_game_moves,
-                attacker_timeout_win=self.attacker_timeout_win,
-                batch_size=self.mcts.batch_size,
-                batch_evaluator=evaluator,
-            )
-            for _ in range(num_parallel)
-        ]
-
-        all_examples: List[TrainingExample] = []
-        all_lock = threading.Lock()
-        completed = [0]
         start_time = time.time()
+        all_examples: List[TrainingExample] = []
+        init_args = (state_dict, model_config, sp_config)
 
-        def run_one(game_idx: int, worker_idx: int):
-            examples = workers[worker_idx].play_game(verbose=False)
-            with all_lock:
+        with ctx.Pool(num_parallel, initializer=_mp_init_worker, initargs=init_args) as pool:
+            done = 0
+            for examples in pool.imap_unordered(_mp_run_one_game, range(num_games)):
                 all_examples.extend(examples)
-                completed[0] += 1
-                done = completed[0]
-            if verbose:
-                elapsed = time.time() - start_time
-                rate = done / elapsed if elapsed > 0 else 0.0
-                print(
-                    f"  ✓ Game {done}/{num_games} done ({len(examples)} moves, "
-                    f"{elapsed:.1f}s elapsed, {rate:.2f} games/s)",
-                    flush=True,
-                )
-
-        try:
-            with ThreadPoolExecutor(max_workers=num_parallel) as pool:
-                futures = [
-                    pool.submit(run_one, i, i % num_parallel)
-                    for i in range(num_games)
-                ]
-                for f in as_completed(futures):
-                    f.result()  # raise if a worker crashed
-        finally:
-            if owns_evaluator:
-                evaluator.close()
+                done += 1
+                if verbose:
+                    elapsed = time.time() - start_time
+                    rate = done / elapsed if elapsed > 0 else 0.0
+                    print(
+                        f"  ✓ Game {done}/{num_games} done ({len(examples)} moves, "
+                        f"{elapsed:.1f}s elapsed, {rate:.2f} games/s)",
+                        flush=True,
+                    )
 
         if verbose:
             elapsed = time.time() - start_time
