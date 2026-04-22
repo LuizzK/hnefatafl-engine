@@ -129,7 +129,8 @@ class SelfPlayWorker:
         dirichlet_epsilon: float = 0.25,
         max_game_moves: int = 200,
         attacker_timeout_win: bool = True,
-        batch_size: int = 32
+        batch_size: int = 32,
+        batch_evaluator=None,
     ):
         """
         Initialize self-play worker.
@@ -151,12 +152,14 @@ class SelfPlayWorker:
         self.dirichlet_epsilon = dirichlet_epsilon
         self.max_game_moves = max_game_moves
         self.attacker_timeout_win = attacker_timeout_win
+        self.batch_evaluator = batch_evaluator
         self.mcts = MCTS(
             neural_network=model,
             num_simulations=num_simulations,
             dirichlet_alpha=dirichlet_alpha,
             dirichlet_epsilon=dirichlet_epsilon,
-            batch_size=batch_size
+            batch_size=batch_size,
+            batch_evaluator=batch_evaluator,
         )
 
     def play_game(self, verbose: bool = False, max_moves: int = None, attacker_timeout_win: bool = None) -> List[TrainingExample]:
@@ -261,7 +264,8 @@ class SelfPlayWorker:
         self,
         num_games: int,
         verbose: bool = False,
-        progress_interval: int = 10
+        progress_interval: int = 10,
+        num_parallel: int = 1,
     ) -> List[TrainingExample]:
         """
         Generate multiple self-play games.
@@ -270,10 +274,17 @@ class SelfPlayWorker:
             num_games: Number of games to generate
             verbose: Whether to print progress
             progress_interval: Print progress every N games
+            num_parallel: If > 1, run this many games concurrently in threads
+                sharing a BatchEvaluator. This is the primary lever for GPU
+                utilization — single-game MCTS is Python-bound and leaves the
+                GPU idle 99% of the time.
 
         Returns:
             List of all training examples from all games
         """
+        if num_parallel > 1:
+            return self._generate_games_concurrent(num_games, num_parallel, verbose=verbose)
+
         all_examples = []
         start_time = time.time()
 
@@ -281,12 +292,10 @@ class SelfPlayWorker:
             if verbose:
                 print(f"\n  Starting game {game_num + 1}/{num_games}...", flush=True)
 
-            # Generate one game
             game_examples = self.play_game(verbose=verbose)
             all_examples.extend(game_examples)
 
             if verbose:
-                result_str = game_examples[-1].value if game_examples else "unknown"
                 print(f"  ✓ Game {game_num + 1}/{num_games} complete: {len(game_examples)} moves", flush=True)
 
         if verbose:
@@ -294,6 +303,88 @@ class SelfPlayWorker:
             print(f"\nGenerated {num_games} games in {elapsed:.1f}s")
             print(f"Total training examples: {len(all_examples)}")
             print(f"Average moves per game: {len(all_examples) / num_games:.1f}")
+
+        return all_examples
+
+    def _generate_games_concurrent(
+        self,
+        num_games: int,
+        num_parallel: int,
+        verbose: bool = False,
+    ) -> List[TrainingExample]:
+        """
+        Run self-play games concurrently using threads + a shared
+        BatchEvaluator. The GIL does not block us because all heavy work
+        (NN forward pass) happens inside torch C++ and releases the GIL.
+        """
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from .mcts import BatchEvaluator
+
+        if self.model is None:
+            raise RuntimeError("concurrent self-play requires a model")
+
+        evaluator = self.batch_evaluator or BatchEvaluator(
+            self.model, max_batch=max(512, num_parallel * self.mcts.batch_size)
+        )
+        owns_evaluator = self.batch_evaluator is None
+
+        # Per-thread workers share the model + evaluator. Each has its own
+        # MCTS tree state; they coordinate only at the NN boundary.
+        workers = [
+            SelfPlayWorker(
+                model=self.model,
+                num_simulations=self.num_simulations,
+                temperature_threshold=self.temperature_threshold,
+                dirichlet_alpha=self.dirichlet_alpha,
+                dirichlet_epsilon=self.dirichlet_epsilon,
+                max_game_moves=self.max_game_moves,
+                attacker_timeout_win=self.attacker_timeout_win,
+                batch_size=self.mcts.batch_size,
+                batch_evaluator=evaluator,
+            )
+            for _ in range(num_parallel)
+        ]
+
+        all_examples: List[TrainingExample] = []
+        all_lock = threading.Lock()
+        completed = [0]
+        start_time = time.time()
+
+        def run_one(game_idx: int, worker_idx: int):
+            examples = workers[worker_idx].play_game(verbose=False)
+            with all_lock:
+                all_examples.extend(examples)
+                completed[0] += 1
+                done = completed[0]
+            if verbose:
+                elapsed = time.time() - start_time
+                rate = done / elapsed if elapsed > 0 else 0.0
+                print(
+                    f"  ✓ Game {done}/{num_games} done ({len(examples)} moves, "
+                    f"{elapsed:.1f}s elapsed, {rate:.2f} games/s)",
+                    flush=True,
+                )
+
+        try:
+            with ThreadPoolExecutor(max_workers=num_parallel) as pool:
+                futures = [
+                    pool.submit(run_one, i, i % num_parallel)
+                    for i in range(num_games)
+                ]
+                for f in as_completed(futures):
+                    f.result()  # raise if a worker crashed
+        finally:
+            if owns_evaluator:
+                evaluator.close()
+
+        if verbose:
+            elapsed = time.time() - start_time
+            print(f"\nGenerated {num_games} games in {elapsed:.1f}s "
+                  f"({num_games / elapsed:.2f} games/s, {num_parallel}-way parallel)")
+            print(f"Total training examples: {len(all_examples)}")
+            if num_games:
+                print(f"Average moves per game: {len(all_examples) / num_games:.1f}")
 
         return all_examples
 

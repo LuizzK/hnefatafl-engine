@@ -7,8 +7,91 @@ with neural network guidance, similar to AlphaZero.
 
 import numpy as np
 import math
+import threading
+import time
 from typing import List, Dict, Optional, Tuple
 from hnefatafl.game import HnefataflGame, Move, Player
+
+
+class BatchEvaluator:
+    """
+    Thread-safe NN evaluation batcher for concurrent self-play.
+
+    Multiple self-play threads call `evaluate(states)` and block until the
+    shared worker thread drains the queue and runs one batched GPU call.
+    Without this, each MCTS runs its own tiny NN call; the GPU sits idle
+    99% of the time because the CPU-side tree walk dominates.
+    """
+
+    def __init__(self, model, max_batch: int = 512, max_wait_ms: float = 2.0):
+        import torch
+        self._torch = torch
+        self._F = __import__('torch.nn.functional', fromlist=['F'])
+        self.model = model
+        self.model.eval()
+        self.device = next(model.parameters()).device
+        self.max_batch = max_batch
+        self.max_wait = max_wait_ms / 1000.0
+        self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
+        self._pending: list = []  # (states_np, event, box)
+        self._alive = True
+        self._worker = threading.Thread(target=self._run, daemon=True)
+        self._worker.start()
+
+    def evaluate(self, states: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Submit a (N, 15, 11, 11) batch. Blocks until results are ready."""
+        event = threading.Event()
+        box: dict = {}
+        with self._cond:
+            self._pending.append((states, event, box))
+            self._cond.notify()
+        event.wait()
+        return box['policies'], box['values']
+
+    def _drain(self):
+        with self._cond:
+            # Wait briefly for more requests to accumulate.
+            if not self._pending:
+                self._cond.wait(timeout=self.max_wait)
+            reqs = self._pending
+            self._pending = []
+        return reqs
+
+    def _run(self):
+        torch = self._torch
+        F = self._F
+        while self._alive:
+            reqs = self._drain()
+            if not reqs:
+                continue
+            try:
+                all_states = np.concatenate([r[0] for r in reqs], axis=0)
+                state_tensor = torch.from_numpy(all_states).float().to(
+                    self.device, non_blocking=True
+                )
+                with torch.no_grad():
+                    logits, values = self.model.forward(state_tensor)
+                    probs = F.softmax(logits, dim=1)
+                policies_np = probs.detach().cpu().numpy()
+                values_np = values.detach().cpu().numpy().flatten()
+            except Exception as exc:  # propagate to all waiters so they don't hang
+                for _, event, box in reqs:
+                    box['error'] = exc
+                    event.set()
+                continue
+            offset = 0
+            for states, event, box in reqs:
+                n = len(states)
+                box['policies'] = policies_np[offset:offset + n]
+                box['values'] = values_np[offset:offset + n]
+                offset += n
+                event.set()
+
+    def close(self):
+        self._alive = False
+        with self._cond:
+            self._cond.notify_all()
 
 
 class MCTSNode:
@@ -134,7 +217,8 @@ class MCTS:
     def __init__(self, neural_network=None, num_simulations: int = 800,
                  c_puct: float = 1.5, temperature: float = 1.0,
                  dirichlet_alpha: float = 0.3, dirichlet_epsilon: float = 0.25,
-                 batch_size: int = 32):
+                 batch_size: int = 32,
+                 batch_evaluator: Optional['BatchEvaluator'] = None):
         """
         Initialize MCTS.
 
@@ -146,6 +230,9 @@ class MCTS:
             dirichlet_alpha: Alpha parameter for Dirichlet noise (for exploration)
             dirichlet_epsilon: Weight of Dirichlet noise in root node
             batch_size: Number of positions to evaluate in parallel on GPU (default 32)
+            batch_evaluator: Optional shared BatchEvaluator. If provided, NN
+                calls are routed through it so that leaves from many games
+                running in parallel coalesce into one GPU call.
         """
         self.neural_network = neural_network
         self.num_simulations = num_simulations
@@ -154,6 +241,7 @@ class MCTS:
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
         self.batch_size = batch_size
+        self.batch_evaluator = batch_evaluator
 
     def search(self, game_state: HnefataflGame, temperature: Optional[float] = None,
                add_noise: bool = False) -> Tuple[Move, np.ndarray]:
@@ -329,23 +417,23 @@ class MCTS:
             return policies, values
 
         # Batch encode all game states
-        states = np.array([node.game_state.encode_state() for node in nodes])
-        state_tensor = torch.FloatTensor(states)
+        states = np.array([node.game_state.encode_state() for node in nodes], dtype=np.float32)
 
-        model_device = next(self.neural_network.parameters()).device
-        state_tensor = state_tensor.to(model_device)
+        # Route through the shared batcher if configured — this coalesces
+        # leaves from other concurrent games into one GPU call.
+        if self.batch_evaluator is not None:
+            policies_np, values_np = self.batch_evaluator.evaluate(states)
+        else:
+            state_tensor = torch.from_numpy(states).float()
+            model_device = next(self.neural_network.parameters()).device
+            state_tensor = state_tensor.to(model_device)
+            self.neural_network.eval()
+            with torch.no_grad():
+                policy_logits, value_tensor = self.neural_network.forward(state_tensor)
+                policy_probs = F.softmax(policy_logits, dim=1)
+            policies_np = policy_probs.cpu().numpy()
+            values_np = value_tensor.cpu().numpy().flatten()
 
-        # Single batched neural network call - this is the KEY optimization!
-        self.neural_network.eval()
-        with torch.no_grad():
-            policy_logits, value_tensor = self.neural_network.forward(state_tensor)
-            policy_probs = F.softmax(policy_logits, dim=1)
-
-        # Convert to numpy
-        policies_np = policy_probs.cpu().numpy()
-        values_np = value_tensor.cpu().numpy().flatten()
-
-        # Split batch results back into individual predictions
         policies = [policies_np[i] for i in range(len(nodes))]
         values = [float(values_np[i]) for i in range(len(nodes))]
 

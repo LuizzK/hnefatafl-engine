@@ -227,10 +227,12 @@ class Trainer:
             batch_size=batch_size
         )
 
+        num_parallel = getattr(self.config, 'selfplay_parallel_games', 1)
         examples = worker.generate_games(
             num_games=self.config.num_games_per_iteration,
             verbose=self.config.verbose,
-            progress_interval=1  # Show progress every game (was 10)
+            progress_interval=1,
+            num_parallel=num_parallel,
         )
 
         if getattr(self.config, 'augment_symmetries', True):
