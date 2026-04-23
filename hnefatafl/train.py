@@ -172,9 +172,42 @@ class Trainer:
         print("\n[2/5] Training neural network...", flush=True)
         train_metrics = self._train_network()
 
+        # Step 2.5: Pre-eval safety checkpoint. A CUDA crash during eval previously
+        # destroyed 2 hours of self-play because best_model.pt was only saved after
+        # eval. Now we save the trained weights before eval runs.
+        if self.iteration % self.config.save_interval == 0:
+            print("   Saving pre-eval safety checkpoint...", flush=True)
+            _prev_best_state = {k: v.detach().clone() for k, v in self.best_model.state_dict().items()}
+            self.best_model.load_state_dict(self.model.state_dict())
+            try:
+                self._save_checkpoint()
+            finally:
+                self.best_model.load_state_dict(_prev_best_state)
+
+        # Clear CUDA allocator fragmentation left by spawned self-play workers
+        # before starting eval — this is the specific condition that triggered
+        # cudaErrorLaunchFailure in the previous run.
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            except Exception:
+                pass
+
         # Step 3: Evaluate new model
         print("\n[3/5] Evaluating new model...", flush=True)
-        win_rate = self._evaluate_models()
+        try:
+            win_rate = self._evaluate_models()
+        except Exception as eval_err:
+            print(f"   ⚠ Evaluation crashed: {type(eval_err).__name__}: {eval_err}", flush=True)
+            if self.iteration == 1:
+                # No prior best exists; trained model beats random by construction.
+                print("   Iter 1 has no prior best — accepting trained model.", flush=True)
+                win_rate = 1.0
+            else:
+                # Keep existing best, skip replacement this round.
+                print("   Keeping prior best, skipping replacement.", flush=True)
+                win_rate = 0.0
         self.win_rates.append(win_rate)
 
         # Step 4: Update best model

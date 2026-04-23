@@ -409,8 +409,9 @@ class MCTS:
         if not nodes:
             return [], []
 
-        if self.neural_network is None:
-            # Random policy if no network
+        # If there's no evaluator AND no in-process model, fall back to a
+        # uniform prior — only hit in tests that run MCTS without a network.
+        if self.neural_network is None and self.batch_evaluator is None:
             policy_size = get_policy_size()
             policies = [np.ones(policy_size) / policy_size for _ in nodes]
             values = [0.0 for _ in nodes]
@@ -419,8 +420,8 @@ class MCTS:
         # Batch encode all game states
         states = np.array([node.game_state.encode_state() for node in nodes], dtype=np.float32)
 
-        # Route through the shared batcher if configured — this coalesces
-        # leaves from other concurrent games into one GPU call.
+        # Prefer the shared batcher (RemoteEvaluator or in-process
+        # BatchEvaluator). Without one, fall back to the local model.
         if self.batch_evaluator is not None:
             policies_np, values_np = self.batch_evaluator.evaluate(states)
         else:

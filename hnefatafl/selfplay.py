@@ -112,41 +112,68 @@ class TrainingExample:
 
 
 # --- Multiprocessing helpers (must be module-level for pickling). -----
-# Each spawned worker loads the model once in _mp_init_worker, then
-# plays one game per dispatch via _mp_run_one_game.
+# With the centralized inference server, workers hold NO model — they
+# hold a RemoteEvaluator that ships state batches back to the main
+# process over mp.Queue. This removes per-worker VRAM and the per-
+# iteration pickle of model weights.
 _MP_WORKER_STATE: dict = {}
 
 
-def _mp_init_worker(state_dict, model_config, sp_config):
-    """Pool initializer: build model on the worker's GPU slot and stash
-    everything the worker needs to play games."""
+def _mp_init_worker(request_q, response_q, worker_id, sp_config):
+    """Pool initializer: set up seeds and stash the RemoteEvaluator."""
     import os
     import numpy as np
     import torch
-    from .network import create_model
+    from .infer_server import RemoteEvaluator
 
     seed = (os.getpid() * 2654435761 + int(time.time() * 1e6)) & 0x7FFFFFFF
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    model = create_model(
-        num_channels=model_config['num_channels'],
-        num_res_blocks=model_config['num_res_blocks'],
-        device=model_config['device'],
-    )
-    model.load_state_dict(state_dict)
-    model.eval()
-
-    _MP_WORKER_STATE['model'] = model
+    _MP_WORKER_STATE['evaluator'] = RemoteEvaluator(request_q, response_q, worker_id)
     _MP_WORKER_STATE['sp_config'] = sp_config
 
 
 def _mp_run_one_game(_game_idx):
     """Play one self-play game inside the worker process."""
-    model = _MP_WORKER_STATE['model']
+    evaluator = _MP_WORKER_STATE['evaluator']
     sp_config = _MP_WORKER_STATE['sp_config']
-    worker = SelfPlayWorker(model=model, **sp_config)
+    # model=None — MCTS routes all NN calls through the RemoteEvaluator.
+    worker = SelfPlayWorker(model=None, batch_evaluator=evaluator, **sp_config)
     return worker.play_game(verbose=False)
+
+
+def _mp_worker_loop(worker_id, request_q, response_q, sp_config, in_q, out_q):
+    """Long-lived worker process: plays games pulled from in_q until it
+    sees a None sentinel, pushing TrainingExample lists to out_q.
+
+    Uses a RemoteEvaluator pointed at the shared inference server.
+    """
+    import os
+    import traceback
+    import numpy as np
+    import torch
+    from .infer_server import RemoteEvaluator
+
+    seed = (os.getpid() * 2654435761 + int(time.time() * 1e6)) & 0x7FFFFFFF
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    try:
+        evaluator = RemoteEvaluator(request_q, response_q, worker_id)
+        worker = SelfPlayWorker(model=None, batch_evaluator=evaluator, **sp_config)
+        while True:
+            item = in_q.get()
+            if item is None:
+                break
+            try:
+                examples = worker.play_game(verbose=False)
+                out_q.put(examples)
+            except Exception as exc:
+                out_q.put(("ERR", f"worker {worker_id}: {exc}\n{traceback.format_exc()}"))
+                break
+    except Exception as exc:
+        out_q.put(("ERR", f"worker {worker_id} init: {exc}\n{traceback.format_exc()}"))
 
 
 class SelfPlayWorker:
@@ -351,28 +378,19 @@ class SelfPlayWorker:
         verbose: bool = False,
     ) -> List[TrainingExample]:
         """
-        Run self-play games in parallel subprocesses. Each worker owns its
-        own model copy on the same GPU; CUDA's scheduler multiplexes the
-        small NN calls across processes, which is what lets the GPU get
-        useful work out of a Python-bound MCTS loop.
-
-        We use multiprocessing (not threads) because the MCTS tree walk is
-        pure Python and the GIL would serialize it back to a single core.
+        Run self-play games in parallel subprocesses, all sharing a single
+        main-process InferenceServer that owns the GPU. Workers hold no
+        model; they ship state batches over mp.Queue and receive policies/
+        values back. This removes per-worker VRAM and lets the GPU see
+        large coalesced batches even though MCTS itself is Python-bound.
         """
-        import torch
         import torch.multiprocessing as mp
+        from .infer_server import InferenceServer
 
         if self.model is None:
             raise RuntimeError("concurrent self-play requires a model")
 
         ctx = mp.get_context('spawn')
-        device = next(self.model.parameters()).device
-        state_dict = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
-        model_config = {
-            'num_channels': getattr(self.model, 'num_channels', 128),
-            'num_res_blocks': getattr(self.model, 'num_res_blocks', 10),
-            'device': 'cuda' if device.type == 'cuda' else 'cpu',
-        }
         sp_config = {
             'num_simulations': self.num_simulations,
             'temperature_threshold': self.temperature_threshold,
@@ -383,23 +401,69 @@ class SelfPlayWorker:
             'batch_size': self.mcts.batch_size,
         }
 
+        # Scale the server's max batch to the number of workers. Each
+        # worker can only have at most one in-flight request at a time
+        # because RemoteEvaluator.evaluate() is blocking, so max_batch ==
+        # num_parallel * mcts_batch_size gives the server enough headroom
+        # to coalesce a full round of leaves.
+        server = InferenceServer(
+            self.model,
+            num_workers=num_parallel,
+            ctx=ctx,
+            max_batch=max(64, num_parallel * self.mcts.batch_size),
+            max_wait_ms=2.0,
+        )
+        server.start()
+
         start_time = time.time()
         all_examples: List[TrainingExample] = []
-        init_args = (state_dict, model_config, sp_config)
 
-        with ctx.Pool(num_parallel, initializer=_mp_init_worker, initargs=init_args) as pool:
+        # Launch workers manually so each gets a unique worker_id and its
+        # own response queue. We assign game indices via a shared input
+        # queue and collect results on a shared output queue.
+        in_q = ctx.Queue()
+        out_q = ctx.Queue()
+        for idx in range(num_games):
+            in_q.put(idx)
+        # One poison pill per worker so each exits after draining.
+        for _ in range(num_parallel):
+            in_q.put(None)
+
+        processes = []
+        for wid in range(num_parallel):
+            p = ctx.Process(
+                target=_mp_worker_loop,
+                args=(wid, server.request_queue, server.response_queue(wid),
+                      sp_config, in_q, out_q),
+            )
+            p.daemon = False
+            p.start()
+            processes.append(p)
+
+        try:
             done = 0
-            for examples in pool.imap_unordered(_mp_run_one_game, range(num_games)):
-                all_examples.extend(examples)
+            while done < num_games:
+                result = out_q.get()
+                if isinstance(result, tuple) and len(result) == 2 and result[0] == "ERR":
+                    # Worker raised; propagate.
+                    raise RuntimeError(f"self-play worker crashed: {result[1]}")
+                all_examples.extend(result)
                 done += 1
                 if verbose:
                     elapsed = time.time() - start_time
                     rate = done / elapsed if elapsed > 0 else 0.0
                     print(
-                        f"  ✓ Game {done}/{num_games} done ({len(examples)} moves, "
+                        f"  ✓ Game {done}/{num_games} done ({len(result)} moves, "
                         f"{elapsed:.1f}s elapsed, {rate:.2f} games/s)",
                         flush=True,
                     )
+        finally:
+            for p in processes:
+                p.join(timeout=10)
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=2)
+            server.stop()
 
         if verbose:
             elapsed = time.time() - start_time
@@ -408,6 +472,8 @@ class SelfPlayWorker:
             print(f"Total training examples: {len(all_examples)}")
             if num_games:
                 print(f"Average moves per game: {len(all_examples) / num_games:.1f}")
+            print(f"Inference server: {server.stats_batches} batches, "
+                  f"{server.stats_states} states evaluated")
 
         return all_examples
 
