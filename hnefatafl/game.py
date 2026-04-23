@@ -79,6 +79,8 @@ class HnefataflGame:
         self.current_player = Player.ATTACKER  # Attackers move first
         self.move_history = []  # List of (board_state, move) tuples for repetition detection
         self.result = GameResult.ONGOING
+        # Cache king position so _find_king() is O(1). None after capture.
+        self._king_pos: Optional[Tuple[int, int]] = (5, 5)
 
         self._setup_initial_position()
 
@@ -164,6 +166,7 @@ class HnefataflGame:
         new_game.current_player = self.current_player
         new_game.move_history = self.move_history.copy()
         new_game.result = self.result
+        new_game._king_pos = self._king_pos
         return new_game
 
     def __str__(self) -> str:
@@ -262,16 +265,15 @@ class HnefataflGame:
         """
         moves = []
 
-        # Find all pieces belonging to current player
-        for row in range(self.BOARD_SIZE):
-            for col in range(self.BOARD_SIZE):
-                piece = self.board[row, col]
-                owner = self.get_piece_owner(piece)
+        # Use a numpy mask to skip the ~85% of squares that are empty
+        # or hold the opponent's pieces.
+        if self.current_player == Player.ATTACKER:
+            owned_mask = (self.board == Piece.ATTACKER)
+        else:
+            owned_mask = (self.board == Piece.DEFENDER) | (self.board == Piece.KING)
 
-                if owner == self.current_player:
-                    # Generate all legal moves for this piece
-                    piece_moves = self._get_piece_moves(row, col)
-                    moves.extend(piece_moves)
+        for row, col in zip(*np.nonzero(owned_mask)):
+            moves.extend(self._get_piece_moves(int(row), int(col)))
 
         return moves
 
@@ -326,13 +328,20 @@ class HnefataflGame:
         legal_moves = self.get_legal_moves()
         return move in legal_moves
 
-    def make_move(self, move: Move) -> bool:
+    def make_move(self, move: Move, _assume_legal: bool = False) -> bool:
         """
         Make a move on the board.
 
+        Args:
+            move: the move to play
+            _assume_legal: skip the legality check. Trusted callers (MCTS
+                expansion, self-play) pass True because the move came from
+                a just-computed get_legal_moves(); re-validating doubles
+                the cost of every simulated move.
+
         Returns: True if move was successful, False otherwise
         """
-        if not self.is_legal_move(move):
+        if not _assume_legal and not self.is_legal_move(move):
             return False
 
         # Store current state for repetition detection
@@ -342,6 +351,10 @@ class HnefataflGame:
         piece = self.board[move.from_row, move.from_col]
         self.board[move.to_row, move.to_col] = piece
         self.board[move.from_row, move.from_col] = Piece.EMPTY
+
+        # Keep the king-position cache in sync.
+        if piece == Piece.KING:
+            self._king_pos = (move.to_row, move.to_col)
 
         # Process captures (standard and shieldwall)
         self._process_captures(move)
@@ -434,16 +447,7 @@ class HnefataflGame:
         - Exception: When king is adjacent to throne, only 3 surrounding attackers needed
         - King cannot be captured on the board edge
         """
-        # Find the king
-        king_pos = None
-        for row in range(self.BOARD_SIZE):
-            for col in range(self.BOARD_SIZE):
-                if self.board[row, col] == Piece.KING:
-                    king_pos = (row, col)
-                    break
-            if king_pos:
-                break
-
+        king_pos = self._find_king()
         if not king_pos:
             return  # King already captured
 
@@ -489,10 +493,12 @@ class HnefataflGame:
             # Need 3 hostile squares when adjacent to throne
             if total_hostile >= 3:
                 self.board[king_row, king_col] = Piece.EMPTY
+                self._king_pos = None
         else:
             # Need all 4 sides surrounded
             if total_hostile >= 4:
                 self.board[king_row, king_col] = Piece.EMPTY
+                self._king_pos = None
 
     def _check_shieldwall_captures(self):
         """
@@ -703,11 +709,26 @@ class HnefataflGame:
             return
 
     def _find_king(self) -> Optional[Tuple[int, int]]:
-        """Find the king's position on the board"""
+        """Return the king's position, or None if captured.
+
+        Backed by `_king_pos`, kept in sync by `make_move` and
+        `_check_king_capture`. The cache is self-healing: if a caller
+        has mutated `self.board` directly (tests do this), the cached
+        position will fail its consistency check and we fall back to a
+        full scan.
+        """
+        cached = self._king_pos
+        if cached is not None:
+            r, c = cached
+            if self.board[r, c] == Piece.KING:
+                return cached
+        # Cache stale — scan and resync.
         for row in range(self.BOARD_SIZE):
             for col in range(self.BOARD_SIZE):
                 if self.board[row, col] == Piece.KING:
-                    return (row, col)
+                    self._king_pos = (row, col)
+                    return self._king_pos
+        self._king_pos = None
         return None
 
     def _check_edge_fort(self) -> bool:

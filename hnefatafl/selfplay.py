@@ -269,8 +269,8 @@ class SelfPlayWorker:
             # Track move for display
             moves_played.append(move)
 
-            # Make the move
-            game.make_move(move)
+            # Move came from MCTS→get_legal_moves(), so always legal.
+            game.make_move(move, _assume_legal=True)
 
             if verbose and move_count % 5 == 0:
                 current_player = "Attacker" if game.current_player == Player.DEFENDER else "Defender"

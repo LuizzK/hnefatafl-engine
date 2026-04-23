@@ -186,7 +186,8 @@ class MCTSNode:
 
         for move, prior in zip(legal_moves, legal_priors):
             child_game = self.game_state.copy()
-            child_game.make_move(move)
+            # Move came from get_legal_moves()— skip redundant validation.
+            child_game.make_move(move, _assume_legal=True)
             child_node = MCTSNode(child_game, parent=self, prior_prob=float(prior), move=move)
             self.children[move] = child_node
 

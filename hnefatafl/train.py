@@ -438,7 +438,7 @@ class Trainer:
             else:
                 move, _ = defender_mcts.search(game, temperature=0.0)
 
-            game.make_move(move)
+            game.make_move(move, _assume_legal=True)
             move_count += 1
 
         return game.get_winner()
